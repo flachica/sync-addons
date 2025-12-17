@@ -860,6 +860,8 @@ def get_OAS_definitions_part(
     fields_meta = model_obj.fields_get(export_fields_dict.keys())
 
     for field, child_fields in export_fields_dict.items():
+        if field not in fields_meta.keys():
+            continue
         meta = fields_meta[field]
         if child_fields:
             child_model = model_obj.env[meta["relation"]]
