@@ -23,6 +23,7 @@ Todo:
 """
 import base64
 import functools
+import re
 import traceback
 
 import werkzeug.wrappers
@@ -39,6 +40,7 @@ from odoo.addons.base_api.lib.pinguin import (
     get_model_for_read,
 )
 from odoo.addons.web.controllers.report import ReportController
+import logging
 
 try:
     import simplejson as json
@@ -95,6 +97,7 @@ CODE__no_api_worker = (
     "The API worker is currently not at work.",
 )
 
+_logger = logging.getLogger(__name__)
 
 def successful_response(status, data=None):
     """Successful responses wrapper.
@@ -153,6 +156,7 @@ def authenticate_token_for_user(token):
         request.session.session_token = user_id and security.compute_session_token(
             request.session, env
         )
+        _logger.info("Authenticated user %s in database %s", user_login, request.session.db)
     
     return user_id
 
@@ -203,21 +207,23 @@ def get_data_from_auth_header(header):
         ) from e
 
     if len(decoded_token_parts) == 1:
-        db_name, user_token = None, decoded_token_parts[0]
+        user_name, user_token, db_name = None, decoded_token_parts[0], None
     elif len(decoded_token_parts) == 2:
-        db_name, user_token = decoded_token_parts
+        user_name, user_token, db_name = decoded_token_parts[0], decoded_token_parts[1], None
+    elif len(decoded_token_parts) == 3:
+        user_name, user_token, db_name = decoded_token_parts
     else:
         err_descrip = (
             'Basic auth header payload must be of the form "<%s>" (encoded to base64)'
             % "user_token"
             if odoo.tools.config["dbfilter"]
-            else "db_name:user_token"
+            else "db_name:user_token:user_name"
         )
         raise werkzeug.exceptions.HTTPException(
             response=error_response(500, "Invalid header", err_descrip)
         )
 
-    return db_name, user_token
+    return db_name, user_token, user_name
 
 
 def setup_db(db_name):
@@ -227,14 +233,14 @@ def setup_db(db_name):
 
     :raise: werkzeug.exceptions.HTTPException if the database not found.
     """
-    if request.session.db:
+    if request.session.db != db_name:
+        if db_name not in odoo.service.db.list_dbs(force=True):
+            raise werkzeug.exceptions.HTTPException(
+                response=error_response(*CODE__db_not_found)
+            )
+        request.session.db = db_name
+    else:
         return
-    if db_name not in odoo.service.db.list_dbs(force=True):
-        raise werkzeug.exceptions.HTTPException(
-            response=error_response(*CODE__db_not_found)
-        )
-
-    request.session.db = db_name
 
 
 ###################
@@ -360,8 +366,9 @@ def route(controller_method):
             auth_header = get_auth_header(
                 request.httprequest.headers, raise_exception=True
             )
-            db_name, user_token = get_data_from_auth_header(auth_header)
-            setup_db(db_name)
+            db_name, user_token, _user_name = get_data_from_auth_header(auth_header)
+            if db_name:
+                setup_db(db_name)
 
             # Authenticate and get user_id (uses its own cursor internally)
             user_id = authenticate_token_for_user(user_token)
